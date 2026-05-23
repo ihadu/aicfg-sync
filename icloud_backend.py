@@ -15,6 +15,7 @@ class iCloudBackend:
     
     ICLOUD_BASE = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
     SYNC_DIR_NAME = "AICfg-Sync"
+    OLD_SYNC_DIR_NAME = "AI-Config-Sync"
     
     def __init__(self, sync_dir_name: Optional[str] = None):
         self.sync_dir = self.ICLOUD_BASE / (sync_dir_name or self.SYNC_DIR_NAME)
@@ -24,6 +25,32 @@ class iCloudBackend:
     def _ensure_sync_dir(self):
         """确保同步目录存在"""
         self.sync_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_if_needed()
+
+    def _migrate_if_needed(self):
+        old_dir = self.ICLOUD_BASE / self.OLD_SYNC_DIR_NAME
+        if not old_dir.exists() or old_dir == self.sync_dir:
+            return
+        if any(not p.name.startswith(".") for p in self.sync_dir.iterdir()):
+            return
+
+        print("🔍 检测到旧版本同步目录，正在迁移...")
+        try:
+            self._copytree_with_symlinks(old_dir, self.sync_dir)
+            state_file = self.sync_dir / ".sync-state.json"
+            if state_file.exists():
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+                old_count = len(state.get("files", {}))
+                state["files"] = {k: v for k, v in state.get("files", {}).items()
+                                  if "settings.local.json" not in k}
+                state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+                removed = old_count - len(state.get("files", {}))
+                if removed > 0:
+                    print(f"  🧹 已清理 {removed} 条 settings.local.json 记录")
+            shutil.rmtree(old_dir)
+            print("✅ 迁移完成")
+        except Exception as e:
+            print(f"⚠️  迁移失败（不影响使用）: {e}")
     
     def get_target_path(self, relative_path: str) -> Path:
         """获取 iCloud 中的目标路径"""
