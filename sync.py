@@ -60,8 +60,14 @@ class SyncEngine:
     
     def push(self, mapping: SyncMapping, include_history=False, auto_resolve: bool = False) -> dict:
         """推送本地配置到 iCloud Drive"""
-        if not auto_resolve and mapping.settings.get("push_default") == "keep-local":
-            auto_resolve = True
+        default_strategy = mapping.settings.get("default_conflict_strategy")
+        if not auto_resolve:
+            if default_strategy == "skip":
+                auto_resolve = True
+            elif default_strategy == "interactive":
+                auto_resolve = False
+            elif mapping.settings.get("push_default") == "keep-local":
+                auto_resolve = True
 
         stats = {"uploaded": 0, "skipped": 0, "failed": 0, "conflicts": 0}
 
@@ -102,8 +108,12 @@ class SyncEngine:
 
                     stats["conflicts"] += 1
                     if auto_resolve:
-                        resolution = ConflictResolution.KEEP_LOCAL
-                        print(f"  ⚠️  冲突自动解决（保留本地）: {relative_target}")
+                        if default_strategy == "skip":
+                            resolution = ConflictResolution.SKIP
+                            print(f"  ⏭️  冲突已跳过（默认策略）: {relative_target}")
+                        else:
+                            resolution = ConflictResolution.KEEP_LOCAL
+                            print(f"  ⚠️  冲突自动解决（保留本地）: {relative_target}")
                     else:
                         resolution = resolve_conflict_interactive(conflict)
 
@@ -146,8 +156,14 @@ class SyncEngine:
     
     def pull(self, mapping: SyncMapping, include_history=False, auto_resolve: bool = False) -> dict:
         """从 iCloud Drive 拉取配置到本地"""
-        if not auto_resolve and mapping.settings.get("pull_default") == "keep-icloud":
-            auto_resolve = True
+        default_strategy = mapping.settings.get("default_conflict_strategy")
+        if not auto_resolve:
+            if default_strategy == "skip":
+                auto_resolve = True
+            elif default_strategy == "interactive":
+                auto_resolve = False
+            elif mapping.settings.get("pull_default") == "keep-icloud":
+                auto_resolve = True
 
         stats = {"downloaded": 0, "skipped": 0, "failed": 0, "conflicts": 0, "unchanged": 0}
 
@@ -164,7 +180,7 @@ class SyncEngine:
             relative_target = file_mapping.target
             self._pull_single_file(
                 section_name, tool_id, file_mapping, local_path, relative_target,
-                local_state, icloud_state, stats, auto_resolve
+                local_state, icloud_state, stats, auto_resolve, default_strategy
             )
 
         if not self.dry_run:
@@ -179,7 +195,7 @@ class SyncEngine:
         return stats
     
     def _pull_single_file(self, section_name, tool_id, file_mapping, local_path, relative_target,
-                          local_state, icloud_state, stats, auto_resolve):
+                          local_state, icloud_state, stats, auto_resolve, default_strategy=None):
         """拉取单个文件/目录"""
         icloud_path = self.backend.get_target_path(relative_target)
         state_key = f"{section_name}:{tool_id}:{relative_target}"
@@ -213,8 +229,12 @@ class SyncEngine:
 
                 stats["conflicts"] += 1
                 if auto_resolve:
-                    resolution = ConflictResolution.KEEP_ICLOUD
-                    print(f"  ⚠️  冲突自动解决（保留 iCloud）: {relative_target}")
+                    if default_strategy == "skip":
+                        resolution = ConflictResolution.SKIP
+                        print(f"  ⏭️  冲突已跳过（默认策略）: {relative_target}")
+                    else:
+                        resolution = ConflictResolution.KEEP_ICLOUD
+                        print(f"  ⚠️  冲突自动解决（保留 iCloud）: {relative_target}")
                 else:
                     resolution = resolve_conflict_interactive(conflict)
 
@@ -316,6 +336,8 @@ class SyncEngine:
                 if local_changed and icloud_changed:
                     conflict += 1
                     print(f"  ⚠️  冲突: {relative_target}")
+                    if is_dir:
+                        self._show_directory_diff(local_path, icloud_path)
                 elif local_changed:
                     pending_local += 1
                     print(f"  ⬆️  本地有更新: {relative_target}")
@@ -387,9 +409,9 @@ class SyncEngine:
                 icloud_hash = self.backend.compute_hash(icloud_path)
                 if local_hash != icloud_hash:
                     print(f"\n{'='*60}")
-                    print(f"📄 {relative_target}")
+                    print(f"📂 {relative_target}")
                     print(f"{'='*60}")
-                    print("  目录内容不同，无法显示详细差异")
+                    self._show_directory_diff(local_path, icloud_path)
                     diff_count += 1
                 continue
 
@@ -437,6 +459,76 @@ class SyncEngine:
         else:
             print(f"发现 {diff_count} 处差异")
         print(f"{'='*60}")
+
+    @staticmethod
+    def _show_directory_diff(local_dir: Path, icloud_dir: Path):
+        """显示目录级别的文件差异"""
+        def _walk(path):
+            result = {}
+            if not path.exists():
+                return result
+            for f in path.rglob("*"):
+                if f.is_file() and not f.name == ".DS_Store":
+                    rel = f.relative_to(path)
+                    result[str(rel)] = {
+                        "size": f.stat().st_size,
+                        "mtime": f.stat().st_mtime,
+                    }
+                elif f.is_symlink() and not f.is_dir():
+                    rel = f.relative_to(path)
+                    result[str(rel)] = {
+                        "size": 0,
+                        "mtime": f.stat().st_mtime,
+                        "linkto": str(os.readlink(f)),
+                    }
+            return result
+
+        local_files = _walk(local_dir)
+        icloud_files = _walk(icloud_dir)
+
+        all_paths = sorted(set(local_files.keys()) | set(icloud_files.keys()))
+        only_local = []
+        only_icloud = []
+        different = []
+
+        for p in all_paths:
+            lf = local_files.get(p)
+            icf = icloud_files.get(p)
+            if lf and not icf:
+                only_local.append(p)
+            elif icf and not lf:
+                only_icloud.append(p)
+            elif lf["size"] != icf["size"] or lf["mtime"] != icf["mtime"]:
+                different.append((p, lf, icf))
+
+        if only_local:
+            print(f"  📍 仅本地有 ({len(only_local)}):")
+            for p in only_local[:10]:
+                print(f"    + {p}")
+            if len(only_local) > 10:
+                print(f"    ... 还有 {len(only_local)-10} 个")
+
+        if only_icloud:
+            print(f"  ☁️  仅 iCloud 有 ({len(only_icloud)}):")
+            for p in only_icloud[:10]:
+                print(f"    + {p}")
+            if len(only_icloud) > 10:
+                print(f"    ... 还有 {len(only_icloud)-10} 个")
+
+        if different:
+            print(f"  🔄 内容不同 ({len(different)}):")
+            for p, lf, icf in different[:10]:
+                changed = []
+                if lf["size"] != icf["size"]:
+                    changed.append(f"大小({lf['size']}B→{icf['size']}B)")
+                if lf.get("linkto") != icf.get("linkto"):
+                    changed.append(f"链接目标不同")
+                print(f"    ~ {p}  ({', '.join(changed)})")
+            if len(different) > 10:
+                print(f"    ... 还有 {len(different)-10} 个")
+
+        if not only_local and not only_icloud and not different:
+            print("  文件列表无差异（可能仅元数据不同）")
 
     @staticmethod
     def _show_text_diff(local_path: Path, icloud_path: Path):

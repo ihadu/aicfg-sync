@@ -7,6 +7,9 @@
 push_default = "keep-local"
 # pull 时的默认冲突策略
 pull_default = "keep-icloud"
+# 默认冲突策略（覆盖 push_default/pull_default）: "skip", "interactive"
+# 设置后所有冲突默认按此策略处理
+# default_conflict_strategy = "skip"
 # 是否启用语义合并（JSON/TOML 非重叠 key 自动合并）
 merge_enabled = true
 
